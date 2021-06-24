@@ -1,0 +1,897 @@
+---
+title: "RLADS  \nFinal Project and Presentation  \n探討各面向疫情與股市之關系"
+date: |
+  | 2021-06-17
+  |
+  |
+author: "戴若竹(材料四 B06507019)  \n余孟琦(會計四 B06702049)  \n洪智恆(財金二 B08703026)  \n林宣戎(圖資四 B06106011)"
+output:
+  html_document:
+    number_sections: yes
+    highlight: tango
+    toc: yes
+    toc_float:
+      collapsed: no
+    css: style.css
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+# 資料來源與主題說明
+* 組名：謝舒凱好帥
+* 分工：
+  + 戴若竹(6)：台股美股資料前處理與分析、圖表繪製、統整
+  + 余孟琦(6)：美股資料整理、ppt資料爬蟲與整理、情緒分析
+  + 洪智恆(6)：台股資料整理與分析、情緒分析、其他補充說明
+  + 林宣戎(6)：美股資料整理與分析、說明撰寫、其他補充說明
+  
+* 分析大綱：
+  + **美股SP500、石油、黃金、比特幣價格**
+    + 對美國疫情資料做散布圖與趨勢圖
+    + 以月為單位，計算RMSE進行分析
+    + 視覺化
+
+  + **台股大盤指數及各類股指數**
+    + 對台灣疫情資料做散布圖與趨勢圖
+    + 以每五天為單位，計算RMSE進行分析
+    + 視覺化
+
+  + **情緒分析**
+    + PTT STOCK版與COVID版的文字情緒比較
+    + 各版情緒對疫情、大盤及類股變動率之分析
+    + 視覺化
+  
+* 資料來源
+  * **美股** 
+    + 資料區間：2020/01/01~2021/04/30
+    + 美國病例數：Our World in Data，是英國牛津大學全球變化數據實驗室的科學出版物
+    + sp500各類股歷史資料：MarketWatch，是一個提供金融信息、商業新聞、分析和股市數據的網站，道瓊公司的子公司(sp500將美國產業分成11大類股)
+
+  * **台股**
+    + 資料區間：2021/04/01~2021/05/31
+    + 台灣病例數：[台灣疫情報告](https://covid-19.nchc.org.tw/dt_005-covidTable_taiwan.php)
+    + 使用r語言的quantmod包中的getSymbols函數擷取股價資料，資料來源自yahoo finance
+    + 類股指數資料來源：來自台灣證券交易所公布之3-5月資料
+
+  * **情緒分析**  
+    + 資料區間：2021/04/01~2021/05/31
+    + ptt covid版及stock版
+    + 使用[cvaw中文維度型情感詞典](http://nlp.innobic.yzu.edu.tw/resources/cvaw.html)
+
+
+# 資料前處理
+對資料表進行初步檢視後，進行整理，以便後續進行資料視覺化。
+
+
+import packages
+
+```{r warning = FALSE, message = FALSE}
+library(htmlwidgets)
+library(webshot)
+library(dplyr)
+library(zoo)
+library(pracma)
+library(ggplot2)
+library(plotly)
+library(dygraphs)
+library(xts)
+library(caret)
+library(tidyr)
+# library(ggpmisc)
+```
+
+定義後續使用之函數
+```{r warning=FALSE, message=FALSE}
+# 計算標準化數據與其七日簡單平均、七日指數平均、變動率
+getMA_ROC <- function(df, prefix){
+  df$Date <- as.Date(df$Date)
+  df[prefix] <- as.numeric(unlist(df[prefix]))
+  preproc1 <- preProcess(df[prefix], method=c("center", "scale"))
+  df['norm'] <- predict(preproc1, df[prefix])
+  df['ROC'] <- (df[prefix] - lag(df[prefix]))/(lag(df[prefix])+1)
+  df['7MA'] <- movavg(unlist(df['norm']),7, type="s")
+  df['7EMA'] <- movavg(unlist(df['norm']),7, type="e")
+  colnames(df) <- c("Date", prefix, paste0(prefix, c("_std","_ROC", "_7MA", "_7EMA")))
+  return(df)
+}
+
+# 計算台灣各類股繪圖資料
+tw_cat_rmse <- function(df){
+  na = colnames(df[2])
+  df['real'] <- df[5]
+  df['pred'] <- df[3]
+  df['origin'] <- df[4]
+  df['residues'] = df['pred'] - df['real']
+  df['group'] = c(rep(seq(as.Date("2021-04-03"), as.Date("2021-05-28"), 5), each = 5), rep(as.Date("2021-06-02"),3)) # 補最後三個
+  df = df %>% group_by(group) %>%
+    summarise(rmse = sqrt(mean(sum(residues**2))), cases = sum(origin), sign = mean(sum(residues)), category = na)
+  return(df)
+}
+```
+
+
+## 讀取原始資料
+
+```{r warning=FALSE, message=FALSE}
+# read data
+list.files("../rlads_Final_Project/data/stock")
+# [1] "BTC-Oil-Gold-COVID.csv" "SP500.csv" "SP500_USnewcases.csv"   "TAIEX-COVID.csv"        "TAIEX.csv"              "TAIEX_7MA.csv"          "TAIEX_ROC.csv"         
+```
+
+```{r warning=FALSE, message=FALSE}
+btc_oil_gold = read.csv("../rlads_Final_Project/data/stock/BTC-Oil-Gold-COVID.csv", encoding = "UTF-8") # 比特幣-原油-黃金價格,七日簡單均線,變動率
+US_SP500_ALL = read.csv("../rlads_Final_Project/data/stock/SP500.csv", encoding = "UTF-8") # 美股標普五百指數原始數值
+US_SP500_CAT = read.csv("../rlads_Final_Project/data/stock/SP500_USnewcases.csv", encoding = "UTF-8") # 美股標普五百各類原始數值
+TAIEX_COVID = read.csv("../rlads_Final_Project/data/stock/TAIEX-COVID.csv", encoding = "UTF-8") # 台股大盤,七日簡單均線,變動率
+TAIEX = read.csv("../rlads_Final_Project/data/stock/TAIEX.csv", encoding = "UTF-8") # 台股類股原始數值
+TAIEX_7MA = read.csv("../rlads_Final_Project/data/stock/TAIEX_7MA.csv", encoding = "UTF-8") # 台股類股七日簡單均線
+TAIEX_ROC = read.csv("../rlads_Final_Project/data/stock/TAIEX_ROC.csv", encoding = "UTF-8") # 台股類股變動率
+
+# 整合至資料列表
+data_list = list(btc_oil_gold, US_SP500_ALL, US_SP500_CAT, TAIEX_COVID, TAIEX, TAIEX_7MA, TAIEX_ROC)
+names(data_list) = gsub("-", "_",list.files('data\\stock'))
+
+```
+
+## 整理欄位名稱與重新分類資料表
+```{r warning=FALSE, message=FALSE}
+# get column names
+col_names = lapply(data_list, colnames)
+```
+
+```{r warning=FALSE, message=FALSE}
+# rename data frame columns
+col_names[[7]] = paste0(col_names[[7]], "_ROC")
+col_names[[6]] = paste0(col_names[[6]], "_7MA")
+col_names[[4]] = c("Date", "大盤", "大盤_ROC", "大盤_7MA", "大盤_7EMA", "TW_COVID", "TW_COVID_ROC" ,"TW_COVID_7MA", "TW_COVID_7EMA", "TW_COVID_CUM")
+col_names[[1]][1] = "Date"
+
+# rename data frame columns
+for (i in 1:length(data_list)){
+  names(data_list[[i]]) <- col_names[[i]]
+}
+```
+
+重新分類data frame，原本的data frame含有重複的欄位(例如疫情資料)，僅保留所需欄位後，分類各類別資料並獨立各自成表。
+
+```{r warning=FALSE, message=FALSE}
+TW_COVID = data_list[[4]][c("Date", "TW_COVID","TW_COVID_ROC" ,"TW_COVID_7MA", "TW_COVID_7EMA", "TW_COVID_CUM" )]
+US_COVID = data_list[[1]][c("Date","new_cases","new_cases_ROC","new_cases_7MA", "total_cases")]
+colnames(US_COVID) <- c("Date", "US_COVID","US_COVID_ROC" ,"US_COVID_7MA", "US_COVID_CUM")
+BTC = data_list[[1]][c("Date","BTC","BTC_7MA", "BTC_ROC")]
+OIL = data_list[[1]][c("Date","Oil","Oil_7MA", "Oil_ROC")]
+GOLD = data_list[[1]][c("Date","Gold","Gold_7MA", "Gold_ROC")]
+TAIEX_ALL = data_list[[4]][c("Date", "大盤", "大盤_ROC", "大盤_7MA", "大盤_7EMA" )]
+TAIEX_CAT = list(data_list[[5]][,2:34], data_list[[6]][,2:34], data_list[[7]][,2:34]) # 只保留類股數據與日期
+US_SP500_CAT[c("X", "NewCases")] <- NULL # 要另外計算7MA, ROC
+# US_SP500_ALL, US_SP500_CAT要另外計算7MA, ROC
+```
+
+```{r warning=FALSE, message=FALSE}
+# 整理後新的data_list
+data_list = list(TW_COVID, US_COVID, BTC, OIL, GOLD, TAIEX_ALL, US_SP500_ALL)
+head(data_list[[1]])
+```
+## 計算標準化後數值
+
+
+```{r warning=FALSE, message=FALSE}
+col <- c("TW_COVID", "US_COVID", "BTC", "Oil", "Gold", "大盤", "SP500")
+
+for (i in 1:length(data_list)){
+  pref <- col[i]
+  dat <- data_list[[i]]
+  data_list[[i]] <- getMA_ROC(dat[c("Date",pref)], prefix = pref)
+}
+head(data_list[[1]])
+```
+
+台灣類股與美國類股資料數眾多，獨立處理。
+```{r warning=FALSE, message=FALSE}
+# 台灣類股
+TAIEX_CAT_list = list()
+for (i in 2:length(TAIEX_CAT[[1]])){
+  dat <- TAIEX_CAT[[1]][c(1,i)]
+  pref <- colnames(dat)[2]
+  TAIEX_CAT_list[[i-1]] <- getMA_ROC(dat[c("Date",pref)], prefix = pref)
+}
+head(TAIEX_CAT_list[[1]])
+
+# 美國類股
+US_SP500_CAT_list = list()
+for (i in 2:length(US_SP500_CAT)){
+  dat <- US_SP500_CAT[c(1,i)]
+  pref <- colnames(dat)[2]
+  US_SP500_CAT_list[[i-1]] <- getMA_ROC(dat[c("Date",pref)], prefix = pref)
+}
+head(US_SP500_CAT_list[[1]])
+```
+
+# 資料視覺化
+## 各樣重要指數對疫情初步探勘
+
+這邊我們先採用初步分別作出**各指數原始值與新增確診人數原始值**及**各指數變動率對新增確診人數變動率**兩種動圖去探索其中的關聯性。
+
+指數包含美國SP500指數、台股大盤指數、比特幣、石油、黃金五種標的。
+
+### 美國SP500指數-COVID-19確診人數散佈圖/趨勢圖
+
+```{r warning = FALSE, message=FALSE}
+temp_data = full_join(data_list[[7]], data_list[[2]], by = "Date")[c("Date","SP500_std","SP500_7MA", "SP500_7EMA","SP500_ROC","US_COVID_std")]
+
+p <- temp_data %>%
+  ggplot( aes(US_COVID_std, SP500_7MA,  color=Date)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "美國SP500指數-COVID-19確診人數散佈圖/趨勢圖",x='單日確診人數(標準化)',y='標準化後指數之七日簡單移動平均') + 
+  theme_bw()
+
+ggplotly(p)
+# saveWidget(ggplotly(p), file="plot\\stock\\SP500_7MA對US_COVID_std.html")
+
+```
+從此圖可以看出美國的股市只有在疫情初期受到劇烈的影響，疫情中期之後無論確診病例數為何，基本上標普500指數都是穩定上升，其中一個因素在於美國(甚至是全球各國)持續進行「量化寬鬆」的貨幣政策，針對特定對象進行「紓困」，並透過印鈔使市場上流動的資金增加，從而達到短期解決市場信心與消費不振的問題([參考資料](https://www.vox.com/business-and-finance/22421417/stock-market-pandemic-economy))。
+
+### 美國大盤指數變動率-COVID-19新增確診人數變動率散佈圖/趨勢圖
+
+```{r warning=FALSE, message=FALSE}
+temp_data = full_join(data_list[[7]], data_list[[2]], by = "Date")
+p <- temp_data %>%
+  ggplot( aes(US_COVID_ROC, SP500_ROC,  color=Date)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "美國SP500指數變動率-COVID-19新增確診人數變動率散佈圖/趨勢圖",x='新增確診人數',y='指數變動率') + 
+  theme_bw()
+
+ggplotly(p)
+# saveWidget(ggplotly(p), file="plot\\stock\\SP500_7MA對US_COVID_std.html")
+```
+
+
+### 台灣大盤指數-COVID-19確診人數散佈圖/趨勢圖
+
+```{r warning=FALSE, message=FALSE}
+temp_data = full_join(data_list[[6]], data_list[[1]], by = "Date") # [c("Date","大盤_std","大盤_7MA", "大盤_7EMA","大盤_ROC","TW_COVID_std")]
+
+p <- temp_data %>%
+  ggplot( aes(TW_COVID_std, 大盤_7MA,  color=Date)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "台灣大盤指數-COVID-19確診人數散佈圖/趨勢圖", x='單日確診人數(標準化)', y='標準化後指數之七日簡單移動平均') + 
+  theme_bw()
+
+ggplotly(p)
+# saveWidget(ggplotly(p), file="plot\\stock\\TAIEX_7MA對TW_COVID_std.html")
+
+```
+
+### 台灣大盤指數變動率-COVID-19新增確診人數變動率散佈圖/趨勢圖
+將大盤指數乘以100使圖表比較更直觀
+```{r warning=FALSE, message=FALSE}
+temp_data = full_join(data_list[[6]], data_list[[1]], by = "Date") # [c("Date","大盤_std","大盤_7MA", "大盤_7EMA","大盤_ROC","TW_COVID_std")]
+
+p <- temp_data %>%
+  ggplot( aes(TW_COVID_ROC, 大盤_ROC*100,  color=Date)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "台灣大盤指數變動率-COVID-19新增確診人數變動率散佈圖/趨勢圖", x='新增確診人數變動率', y='指數變動率') + 
+  theme_bw()
+
+ggplotly(p)
+# saveWidget(ggplotly(p), file="plot\\stock\\TAIEX_7MA對TW_COVID_std.html")
+
+```
+
+
+
+### 比特幣-COVID-19確診人數趨勢圖/散佈圖
+
+```{r warning=FALSE, message=FALSE}
+temp_data = full_join(data_list[[3]], data_list[[2]], by = "Date")
+
+p <- temp_data %>%
+  ggplot( aes(US_COVID_std, BTC_7MA,  color=Date)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "比特幣-COVID-19確診人數散佈圖/趨勢圖",x='單日確診人數(標準化)',y='標準化後指數之七日簡單移動平均') + 
+  theme_bw()
+
+ggplotly(p)
+# saveWidget(ggplotly(p), file="plot\\stock\\SP500_7MA對US_COVID_std.html")
+
+```
+
+### 比特幣變動率-COVID-19確診人數變動率趨勢圖/散佈圖
+
+```{r warning=FALSE, message=FALSE}
+temp_data = full_join(data_list[[3]], data_list[[2]], by = "Date")
+
+p <- temp_data %>%
+  ggplot( aes(US_COVID_ROC, BTC_ROC,  color=Date)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "比特幣變動率-COVID-19確診人數變動率散佈圖/趨勢圖",x='新增確診人數變動率',y='比特幣變動率') + 
+  theme_bw()
+
+ggplotly(p)
+# saveWidget(ggplotly(p), file="plot\\stock\\SP500_7MA對US_COVID_std.html")
+
+```
+
+
+
+### 石油-COVID-19確診人數趨勢圖/散佈圖
+
+```{r warning=FALSE, message=FALSE}
+temp_data = full_join(data_list[[4]], data_list[[2]], by = "Date")
+
+p <- temp_data %>%
+  ggplot( aes(US_COVID_std, Oil_7MA,  color=Date)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "石油-COVID-19確診人數散佈圖/趨勢圖",x='單日確診人數(標準化)',y='標準化後指數之七日簡單移動平均') + 
+  theme_bw()
+
+ggplotly(p)
+# saveWidget(ggplotly(p), file="plot\\stock\\SP500_7MA對US_COVID_std.html")
+
+```
+
+### 石油變動率-COVID-19確診人數變動率趨勢圖/散佈圖
+
+```{r warning=FALSE, message=FALSE}
+temp_data = full_join(data_list[[4]], data_list[[2]], by = "Date")
+
+p <- temp_data %>%
+  ggplot( aes(US_COVID_ROC, Oil_ROC,  color=Date)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "石油變動率-COVID-19確診人數散佈圖/趨勢圖",x='新增確診人數變動率',y='石油變動率') + 
+  theme_bw()
+
+ggplotly(p)
+# saveWidget(ggplotly(p), file="plot\\stock\\SP500_7MA對US_COVID_std.html")
+
+```
+
+
+
+### 黃金-COVID-19確診人數趨勢圖/散佈圖
+
+```{r warning=FALSE, message=FALSE}
+temp_data = full_join(data_list[[5]], data_list[[2]], by = "Date")
+
+p <- temp_data %>%
+  ggplot( aes(US_COVID_std, Gold_7MA,  color=Date)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "黃金-COVID-19確診人數散佈圖/趨勢圖",x='單日確診人數(標準化)',y='標準化後指數之七日簡單移動平均') + 
+  theme_bw()
+
+ggplotly(p)
+# saveWidget(ggplotly(p), file="plot\\stock\\SP500_7MA對US_COVID_std.html")
+
+```
+
+### 黃金變動率-COVID-19確診人數變動率趨勢圖/散佈圖
+
+```{r warning=FALSE, message=FALSE}
+temp_data = full_join(data_list[[5]], data_list[[2]], by = "Date")
+
+p <- temp_data %>%
+  ggplot( aes(US_COVID_ROC, Gold_ROC,  color=Date)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "黃金變動率-COVID-19確診人數散佈圖/趨勢圖",x='新增確診人數變動率',y='黃金變動率') + 
+  theme_bw()
+
+ggplotly(p)
+# saveWidget(ggplotly(p), file="plot\\stock\\SP500_7MA對US_COVID_std.html")
+
+```
+
+
+## 各樣重要指數不同時期rmse之探討
+
+初步看完以上資料的簡單關聯後，我們想利用rmse看不同時期病例數對指數的波動影響。
+
+### 美國SP500指數對確診人數之rmse(每月)
+
+```{r warning = FALSE, message=FALSE}
+# 抓出繪圖所需資料
+us_case = full_join(data_list[[2]][c("Date","US_COVID","US_COVID_std")], data_list[[7]][c("Date","SP500_std")],by = 'Date')
+
+# 計算殘差
+us_case['residues'] = us_case['SP500_std'] - us_case['US_COVID_std']
+
+# 處理時間序列(以一個月為單位)
+dates <- c("2020/01", "2020/02", "2020/03", "2020/04", "2020/05", "2020/06",
+           "2020/07", "2020/08", "2020/09", "2020/10", "2020/11", "2020/12",
+           "2021/01", "2021/02", "2021/03", "2021/04")
+us_case['group'] = format(us_case['Date'], '%Y-%m')
+
+# 每一個月加總一次算rmse
+US_RMSE = us_case %>% group_by(group) %>%
+  summarise(rmse = sqrt(mean(sum(residues**2))), cases = sum(US_COVID), sign = mean(sum(residues)))
+US_RMSE['group'] <- as.Date(as.yearmon(unlist(US_RMSE['group'])) )+14
+# 繪圖
+p <- ggplot( )+ 
+  geom_bar(data = US_RMSE, aes(x = group, y = cases/100000), stat = "identity") + 
+  geom_point(data = US_RMSE, aes(x = group, y = rmse*5, colour = "rmse(/5)")) + 
+  geom_line(data = US_RMSE, aes(x = group, y = rmse*5, colour = "rmse(/5)")) +
+  geom_line(data = US_RMSE, aes(x = group, y = sign, colour = "sign"))  +
+  labs(title = "US_RMSE(monthly)", x ="日期", y = "一個月內累積確診人數 (*10^5)",color = 'lines') + 
+  theme_bw()
+
+ggplotly(p)
+# saveWidget(ggplotly(p), file="plot\\stock\\US_RMSE(monthly).html")
+
+```
+若單純觀察美國每日新增確診人數與美國SP500指數的RMSE，可以發現主要的波動有兩次，第一次落在2020年3月至4月，而第二次則是落在2020年12月至2021年1月。第一次的RMSE波動主要就是受到新冠肺炎疫情第一次升溫的影響([佐證資料](https://www.ripublication.com/irbf20/irbfv12n1_01.pdf))。第二次的RMSE波動則與第二次疫情升溫沒有太大影響，反而是因為美國2020年12月開始實施一系列疫情的應對措施，使得投資這對未來疫情的控制充滿了希望([佐證資料](https://www.washingtonpost.com/business/2020/12/31/stock-market-record-2020/))。
+
+
+### 美國SP500各類股指數對確診人數之rmse(每月)
+
+```{r warning = FALSE, message=FALSE}
+dfRMSE = read.csv("RMSE.csv", encoding ="UTF-8")
+dfRMSE['Date']<- as.Date(as.yearmon(unlist(dfRMSE['Date']), "%Y/%m"))+14
+casesCol = data_list[[2]][c("Date", "US_COVID") ]
+casesCol['Date']<- as.Date(unlist(casesCol['Date'])) 
+casesCol['Date'] = format(casesCol['Date'], "%Y-%m")
+casesCol['US_COVID'] <- as.numeric(unlist(casesCol['US_COVID'])) 
+casesCol<- casesCol %>%
+  group_by(Date) %>%
+  summarise(sum = sum(US_COVID ))
+casesCol['Date'] <- as.Date(as.yearmon(unlist(casesCol['Date']), "%Y-%m"))+14
+
+p <- ggplot() + 
+  geom_bar(data = casesCol, aes(x = Date, y = sum*100/0.3), stat = "identity") + 
+  geom_point(data = dfRMSE, aes(x = Date, y = RMSE, group = Category, color = Category)) + 
+  geom_line(data = dfRMSE, aes(x = Date, y = RMSE, group = Category, color = Category)) +
+  # 副座標軸：Cases (調整刻度)
+  scale_y_continuous(sec.axis = sec_axis(~. *0.3/100, name = "Cases")) +
+  labs(title = "11 Categories' RMSE in S&P500") + 
+  theme_bw()
+
+ggplotly(p)
+# saveWidget(ggplotly(p), file="plot\\stock\\11_Categories_RMSE_SP500.html")
+```
+該圖表將美國SP500的11個產業類股進行分別觀察，可以看出2020年11月以前的每日確診數與各類股指數波動都有一定的相關性，12月到1月這段期間的RMSE明顯提高，顯示出在這段期間類股指數的變動率遠大於確診數。也就是說[美國新增確診數從1月逐漸下降](https://www.nytimes.com/interactive/2021/us/covid-cases.html)，但是下降幅度不及各大類股上升的幅度。以下取出在2020年12月至2021年1月之間，RMSE波動最大的兩個產業類股與波動最小的兩個類股進行分析：
+
+* RMSE波動較大：
+  + 醫療保健類股指數(Health Care)
+    + 美國於12月分別給予輝瑞疫苗與莫德納疫苗緊急使用授權，使得醫療保健類股指數在這段期間指數大幅上漲。<br />
+    [BBC中文網：新冠疫苗開打，你應當知道的幾大問題](https://www.bbc.com/zhongwen/trad/science-55332811)
+  + 能源類股(Energy)
+    + 燃油佔能源產業大宗，國際旅行的大幅減少使得美國對於能源的需求下降。<br />
+    [Economic Change and Restructuring: Impact of COVID-19 pandemic on the energy markets](https://link.springer.com/article/10.1007/s10644-021-09320-0)
+    + 從12月中下旬開始出入境的旅客數開始恢復穩定在百萬人次以上，間接解釋能源類股大幅上升的原因。<br />
+    [TSA: checkpoint travel numbers per day](https://www.tsa.gov/coronavirus/passenger-throughput)
+
+* RMSE波動較小：
+  + 不動產類股(Real Estate)
+    + 房地產業只要都是受到疫情的影響，因此RMSE就比較沒有太巨大的波動。
+  + 必須性消費品(Consumer Staples)
+    + 民生必需品並不會因為疫情的嚴重與疫情相關的政策而有太大的的改變。<br />
+    [美國聯邦儲備銀行經濟研究](https://www.stlouisfed.org/on-the-economy/2021/march/covid19-impacted-stock-performance-industry)
+
+### 比特幣、原油、黃金指數對確診人數之rmse(每月)
+```{r warning=FALSE, message=FALSE}
+# btc, oil, gold
+BTC_OIL_GOLD_PLOT <- list()
+BTC_OIL_GOLD_PLOT[[1]] <- data_list[[3]]
+BTC_OIL_GOLD_PLOT[[2]] <- data_list[[4]]
+BTC_OIL_GOLD_PLOT[[3]] <- data_list[[5]]
+BTC_OIL_GOLD_PLOT[[1]]['group'] = 'BTC'
+BTC_OIL_GOLD_PLOT[[2]]['group'] = 'OIL'
+BTC_OIL_GOLD_PLOT[[3]]['group'] = 'GOLD'
+
+names(BTC_OIL_GOLD_PLOT[[1]]) <- c('Date','origin','std','ROC', '7MA', '7EMA', 'group')
+names(BTC_OIL_GOLD_PLOT[[2]]) <- c('Date','origin','std','ROC', '7MA', '7EMA', 'group')
+names(BTC_OIL_GOLD_PLOT[[3]]) <- c('Date','origin','std','ROC', '7MA', '7EMA', 'group')
+
+# 抓出繪圖所需資料
+temp_data = rbind(BTC_OIL_GOLD_PLOT[[1]],BTC_OIL_GOLD_PLOT[[2]], BTC_OIL_GOLD_PLOT[[3]])
+BOG_case = full_join(data_list[[2]][c("Date","US_COVID","US_COVID_std")], temp_data, by = 'Date')
+
+# 計算殘差
+BOG_case['residues'] = BOG_case['std'] - BOG_case['US_COVID_std']
+
+# 處理時間序列(以一個月為單位)
+BOG_case['month'] = format(BOG_case['Date'], '%Y-%m')
+
+# 計算總表
+BOG_RMSE = BOG_case %>% group_by(group, month) %>%
+  summarise(rmse = sqrt(mean(sum(residues**2))), cases = sum(US_COVID), sign = mean(sum(residues)))
+BOG_RMSE['month'] <- as.Date(as.yearmon(unlist(BOG_RMSE['month'])) )+14
+
+# 繪圖
+p <- ggplot( )+ 
+  geom_bar(data = BOG_RMSE, aes(x = month, y = cases/100000), stat = "identity") + 
+  geom_point(data = BOG_RMSE, aes(x = month, y = rmse*7, group = group, colour = group)) + 
+  geom_line(data = BOG_RMSE, aes(x = month, y = rmse*7, group = group, colour = group)) +
+  geom_line(linetype="dashed",data = BOG_RMSE, aes(x = month, y = sign, group = group, colour = group))  +
+  labs(title = "BTC_OIL_GOLD_RMSE(monthly)", x ="日期", y = "一個月內累積確診人數 (*10^5)",color = 'lines') + 
+  theme(text=element_text(size=25,  family="A"))+
+  theme_bw()
+
+ggplotly(p)
+# saveWidget(ggplotly(p), file="plot\\stock\\BTC_OIL_GOLD_RMSE(monthly).html")
+
+```
+
+### 台灣大盤指數對確診人數之rmse(每五天)
+```{r warning=FALSE, message=FALSE}
+# 每五天加總一次算rmse
+tw_case = full_join(data_list[[1]][c("Date","TW_COVID","TW_COVID_std")], data_list[[6]][c("Date","大盤_std")],by = 'Date')
+
+# 計算殘差
+tw_case['residues'] = tw_case['大盤_std'] - tw_case['TW_COVID_std']
+
+# 每五天分為一類進行RMSE計算
+tw_case['group'] = c(rep(seq(as.Date("2021-04-03"), as.Date("2021-05-28"), 5), each = 5), rep(as.Date("2021-06-02"),3)) # 補最後三個
+TW_RMSE = tw_case %>% group_by(group) %>%
+  summarise(rmse = sqrt(mean(sum(residues**2))), cases = sum(TW_COVID), sign = mean(sum(residues)))
+
+# 繪圖
+p <- ggplot() + 
+  geom_bar(data = TW_RMSE, aes(x = group, y = cases*0.4/100), stat = "identity") + 
+  geom_point(data = TW_RMSE, aes(x = group, y = rmse, colour = "rmse")) + 
+  geom_line(data = TW_RMSE, aes(x = group, y = rmse, color = "rmse")) +
+  geom_line(linetype="dashed",data = TW_RMSE, aes(x = group, y = sign, color = "sign"))  +
+  labs(title = "TAIEX_RMSE(5 DAYS)", x ="日期", y = "五天內累積確診人數 (*100/0.4)",color = 'lines') + 
+  theme_bw()
+
+ggplotly(p)
+# saveWidget(ggplotly(p), file="plot\\stock\\TAIEX_RMSE(5 DAYS).html")
+
+```
+
+
+台灣類股資料處理
+```{r warning=FALSE, message=FALSE}
+TAIEX_CAT_plot = data.frame()
+TAIEX_CAT_w_COVID = list()
+for (i in 1:length(TAIEX_CAT_list)){
+  tw_case = full_join(TAIEX_CAT_list[[i]][c(1:3)],data_list[[1]][c("Date","TW_COVID","TW_COVID_std")], by = 'Date')
+  TAIEX_CAT_plot = rbind(TAIEX_CAT_plot,data.frame(tw_cat_rmse(tw_case)))
+  TAIEX_CAT_w_COVID[[i]] <- data.frame(tw_cat_rmse(tw_case))
+}
+head(TAIEX_CAT_plot)
+head(TAIEX_CAT_w_COVID)
+```
+
+
+因台灣類股分類數量太多，不易呈現。我們將32類股分為：工業相關、電子相關與服務相關。
+```{r warning=FALSE, message=FALSE}
+# 類股分類
+unique(TAIEX_CAT_plot$category)
+
+# 工業相關
+industrial = c("塑膠", "玻璃", "水泥", "造紙", "鋼鐵","橡膠", "窯製", "油電","窯製","化工","化學", "化生", "生技")
+
+# 電子相關
+electronics = c("半導體" ,"電腦","光電" ,  "電通" ,  "零組件" ,"電子", "電機", "電纜","其他電")
+
+# 服務相關
+service = c("食品", "紡織","營建", "航運"  , "觀光"  , "金融" ,  "百貨", "通信"  , "資服","其他" )
+```
+
+### 台灣工業相關指數對確診人數之rmse(每五天)
+```{r warning=FALSE, message=FALSE}
+p <- ggplot() + 
+  geom_bar(data = TW_RMSE, aes(x = group, y = cases*0.3/100), stat = "identity") + 
+  geom_point(data = TAIEX_CAT_plot%>%filter(category %in%industrial), aes(x = group, y = rmse, group = category, color = category)) + 
+  geom_line(data = TAIEX_CAT_plot%>%filter(category %in%industrial), aes(x = group, y = rmse, group = category, color = category)) +
+  geom_line(linetype="dashed",data = TAIEX_CAT_plot%>%filter(category %in%industrial), aes(x = group, y = sign, group = category, color = category))  +
+  # 副座標軸：Cases (調整刻度)
+  # scale_y_continuous(sec.axis = sec_axis(~. *100/0.3, name = "Cases")) +
+  labs(title = "TAIEX_工業相關類股分類_RMSE(5 DAYS)", x ="日期", y = "五天內累積確診人數 (*100/0.3)") + 
+  theme_bw()
+
+ggplotly(p)
+# saveWidget(ggplotly(p), file="plot\\stock\\TAIEX_工業相關類股分類_RMSE(5 DAYS).html")
+
+```
+
+### 台灣電子相關指數對確診人數之rmse(每五天)
+
+```{r warning=FALSE, message=FALSE}
+p <- ggplot() + 
+  geom_bar(data = TW_RMSE, aes(x = group, y = cases*0.3/100), stat = "identity") + 
+  geom_point(data = TAIEX_CAT_plot%>%filter(category %in%electronics), aes(x = group, y = rmse, group = category, color = category)) + 
+  geom_line(data = TAIEX_CAT_plot%>%filter(category %in%electronics), aes(x = group, y = rmse, group = category, color = category)) +
+  geom_line(linetype="dashed",data = TAIEX_CAT_plot%>%filter(category %in%electronics), aes(x = group, y = sign, group = category, color = category))  +
+  # 副座標軸：Cases (調整刻度)
+  scale_y_continuous(sec.axis = sec_axis(~. *100/0.3, name = "Cases")) +
+  labs(title = "TAIEX_電子相關類股分類_RMSE(5 DAYS)", x ="日期", y = "五天內累積確診人數 (*100/0.3)") + 
+  theme_bw()
+
+ggplotly(p)
+# saveWidget(ggplotly(p), file="plot\\stock\\TAIEX_電子相關類股分類_RMSE(5 DAYS).html")
+
+```
+
+### 台灣服務相關指數對確診人數之rmse(每五天)
+
+```{r warning=FALSE, message=FALSE}
+p <- ggplot() + 
+  geom_bar(data = TW_RMSE, aes(x = group, y = cases*0.3/100), stat = "identity") + 
+  geom_point(data = TAIEX_CAT_plot%>%filter(category %in%service), aes(x = group, y = rmse, group = category, color = category)) + 
+  geom_line(data = TAIEX_CAT_plot%>%filter(category %in%service), aes(x = group, y = rmse, group = category, color = category)) +
+  geom_line(linetype="dashed",data = TAIEX_CAT_plot%>%filter(category %in%service), aes(x = group, y = sign, group = category, color = category))  +
+  # 副座標軸：Cases (調整刻度)
+  scale_y_continuous(sec.axis = sec_axis(~. *100/0.3, name = "Cases")) +
+  labs(title = "TAIEX_服務相關類股分類_RMSE(5 DAYS)", x ="日期", y = "五天內累積確診人數 (*100/0.3)") + 
+  theme_bw()
+
+ggplotly(p)
+# saveWidget(ggplotly(p), file="plot\\stock\\TAIEX_服務相關類股分類_RMSE(5 DAYS).html")
+
+```
+
+### 台灣各類股變動率對單日新增確診人數變動率作圖
+將台股類股指數變動率乘上100使數據直觀
+```{r warning=FALSE, message=FALSE}
+for (i in 1:32){
+  df = TAIEX_CAT_list[[i]]
+  name = colnames(df)[2]
+  colnames(df)[3:6] <- c("std","ROC", "7MA", "7EMA")
+  df = full_join(df, data_list[[1]], by = "Date")
+  p <- ggplot(df, aes(TW_COVID_ROC , ROC*100,  color=Date)) +
+    geom_point() +
+    geom_smooth(method = "lm")+
+    ylim(-2.5,2.5)+
+    labs(title = paste0(name,"類股_變動率對單日新增確診人數變動率作圖"), x ="單日新增確診人數變動率", y = "類股指數變動率") + 
+    theme_bw()
+  
+  ggplotly(p)
+  # saveWidget(ggplotly(p), file=paste0("plot\\stock\\",name,"類股_變動率對單日確診人數作圖.html"))
+}
+```
+
+### 以觀光類股為例
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+  df = TAIEX_CAT_list[[14]]
+  name = colnames(df)[2]
+  colnames(df)[3:6] <- c("std","ROC", "7MA", "7EMA")
+  df = full_join(df, data_list[[1]], by = "Date")
+  p <- ggplot(df, aes(TW_COVID_ROC , ROC*100,  color=Date)) +
+    geom_point() +
+    geom_smooth(method = "lm")+
+    ylim(-2.5,2.5)+
+    labs(title = paste0(name,"類股_變動率對單日新增確診人數變動率作圖"), x ="單日新增確診人數變動率", y = "觀光指數變動率") + 
+    theme_bw()
+  
+  ggplotly(p)
+```
+### 以光電類股為例
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+  df = TAIEX_CAT_list[[23]]
+  name = colnames(df)[2]
+  colnames(df)[3:6] <- c("std","ROC", "7MA", "7EMA")
+  df = full_join(df, data_list[[1]], by = "Date")
+  p <- ggplot(df, aes(TW_COVID_ROC , ROC*100,  color=Date)) +
+    geom_point() +
+    geom_smooth(method = "lm")+
+    ylim(-2.5,2.5)+
+    labs(title = paste0(name,"類股_變動率對單日確診人數作圖"), x ="單日新增確診人數變動率", y = "觀光指數變動率") + 
+    theme_bw()
+  
+  ggplotly(p)
+```
+
+# 情緒分析
+已計算之各版情緒分數資料區間選取，考量情緒冷靜激動程度做加權分數
+
+```{r warning=FALSE, message=FALSE}
+## 台股
+# 大盤
+TAIEX_COVID_df <- as_tibble(readr::read_csv("../rlads_Final_Project/data/cvaw/TAIEX-COVID.csv")) %>%
+    mutate(Date = as.Date(X1)) %>%
+    select(-X1) %>%
+    filter(between(Date, as.Date("2021-04-01"), as.Date("2021-05-31")))
+# 類股
+TAIEX_df <- as_tibble(readr::read_csv("../rlads_Final_Project/data/cvaw/TAIEX.csv")) %>%
+    select(-X1) %>%
+    mutate(Date = as.Date(Date)) %>%
+    filter(between(Date, as.Date("2021-04-01"), as.Date("2021-05-31")))
+# 類股變動率
+TAIEX_ROC_df <- as_tibble(readr::read_csv("../rlads_Final_Project/data/cvaw/TAIEX_ROC.csv")) %>%
+    select(-X1) %>%
+    mutate(Date = as.Date(Date)) %>%
+    filter(between(Date, as.Date("2021-04-01"), as.Date("2021-05-31")))
+
+# covid板
+plt_df_cvaw_covid <- as_tibble(readr::read_csv("../rlads_Final_Project/data/cvaw/cvaw_covid.csv")) %>%
+    mutate(Date = as.Date(Date)) %>%
+    filter(between(Date, as.Date("2021-04-01"), as.Date("2021-05-31"))) %>%
+    mutate(score_sum = round(Valence_Sum * (Arousal_Sum + words_Num * 5), 6), 
+           score_avg = if_else(score_sum == 0, 0, round(score_sum / ((words_Num)** 2), 6)))
+
+# stock板
+plt_df_cvaw_stock <- as_tibble(readr::read_csv("../rlads_Final_Project/data/cvaw/cvaw_stock.csv")) %>%
+    mutate(Date = as.Date(Date)) %>%
+    filter(between(Date, as.Date("2021-04-01"), as.Date("2021-05-31"))) %>%
+    mutate(score_sum = round(Valence_Sum * (Arousal_Sum + words_Num * 5), 6), 
+           score_avg = if_else(score_sum == 0, 0, round(score_sum / ((words_Num)** 2), 6)))
+```
+
+計算每天各版平均情緒分數
+```{r warning=FALSE, message=FALSE}
+## 做每日平均分數
+# covid板
+group_plt_df_cvaw_covid <- plt_df_cvaw_covid %>%
+    group_by(Date) %>%
+    summarise(score_sum_date = mean(score_sum), score_avg_date = mean(score_avg)) %>%
+    ungroup()
+
+# stock板
+group_plt_df_cvaw_stock <- plt_df_cvaw_stock %>%
+    group_by(Date) %>%
+    summarise(score_sum_date = mean(score_sum), score_avg_date = mean(score_avg)) %>%
+    ungroup()
+```
+
+```{r warning=FALSE, message=FALSE}
+temp_p = ggplot(data = plt_df_cvaw_covid)+
+    geom_point(aes(x = Valence_Avg, y = Arousal_Avg, color = Date), size = 0.1)+
+    theme_bw()
+ggplotly(temp_p)
+
+temp_p = ggplot(data = plt_df_cvaw_covid)+
+    geom_point(aes(x = Valence_Sum, y = Arousal_Sum, color = Date), size = 0.1)+
+    theme_bw()
+ggplotly(temp_p)
+```
+
+```{r warning=FALSE, message=FALSE}
+#
+p1<-ggplot()+
+    geom_hline(yintercept = 0)+
+    geom_line(data = group_plt_df_cvaw_covid, aes(x = Date, y = score_avg_date), color = "red")+
+    geom_line(data = group_plt_df_cvaw_stock, aes(x = Date, y = score_avg_date), color = "blue")+
+    labs(title = "COVID版與股版日期對平均情緒分數折線圖" , x = "日期", y= "平均情緒分數")+
+    theme_bw()
+
+ggplotly(p1)
+#
+p2<-ggplot()+
+    geom_hline(yintercept = 0)+
+    geom_vline(xintercept = 0)+
+    geom_point(aes(x=group_plt_df_cvaw_covid$score_avg_date, y=group_plt_df_cvaw_stock$score_avg_date))+
+    geom_smooth(aes(x=group_plt_df_cvaw_covid$score_avg_date, y=group_plt_df_cvaw_stock$score_avg_date), method="lm")+
+    labs(title = "COVID版對股版平均情緒分數散佈圖" , x = "COVID版平均情緒分數", y= "股版平均情緒分數")+
+    theme_bw()
+
+ggplotly(p2)
+```
+
+## 各版對新增人數變動率
+```{r warning=FALSE, message=FALSE}
+# covid-19板對新增人數變動率
+temp_p = ggplot()+
+    geom_hline(yintercept = 0) +
+    geom_point(data = plt_df_cvaw_covid, aes(x = Date , y = score_avg), color = ifelse(plt_df_cvaw_covid$score_avg >= 0, "pink", "lightgreen"), size = 1)+
+    geom_line(data = group_plt_df_cvaw_covid, aes(x = Date, y = score_avg_date*5), color = "darkgray") +
+    geom_point(data = group_plt_df_cvaw_covid, aes(x = Date, y = score_avg_date*5), 
+               color = ifelse(TAIEX_COVID_df$日新增案例變動率 >= 0, "red", "darkgreen"), 
+               size = abs(TAIEX_COVID_df$日新增案例變動率)*3) + 
+    
+    theme_bw() + 
+    labs(title = "Covid-19版情緒分析-對新增病例變動率")
+ggplotly(temp_p)
+```
+
+```{r warning=FALSE, message=FALSE}
+# stock板對新增人數變動率
+temp_p =ggplot()+
+    geom_hline(yintercept = 0) +
+    geom_point(data = plt_df_cvaw_stock, aes(x = Date, y = score_avg), color = ifelse(plt_df_cvaw_stock$score_avg >= 0, "pink", "lightgreen"), size = 1)+
+    geom_line(data = group_plt_df_cvaw_stock, aes(x = Date, y = score_avg_date*10), color = "darkgray") + 
+    geom_point(data = group_plt_df_cvaw_stock, aes(x = Date, y = score_avg_date*10), 
+               color = ifelse(TAIEX_COVID_df$日新增案例變動率 >= 0, "red", "darkgreen"), 
+               size = abs(TAIEX_COVID_df$日新增案例變動率) * 3) + 
+    
+    theme_bw() + 
+    labs(title = "股版情緒分析-對新增病例變動率") 
+ggplotly(temp_p)
+```
+
+## 各版對大盤變動率
+```{r warning=FALSE, message=FALSE}
+# covid-19板對大盤變動率
+temp_p = ggplot()+
+    geom_hline(yintercept = 0) +
+    geom_point(data = plt_df_cvaw_covid, aes(x = Date , y = score_avg), color = ifelse(plt_df_cvaw_covid$score_avg >= 0, "pink", "lightgreen"), size = 1)+
+    geom_line(data = group_plt_df_cvaw_covid, aes(x = Date, y = score_avg_date*5), color = "darkgray") +
+    geom_point(data = group_plt_df_cvaw_covid, aes(x = Date, y = score_avg_date*5), 
+               color = ifelse(TAIEX_COVID_df$大盤變動率 >= 0, "red", "darkgreen"), 
+               size = abs(TAIEX_COVID_df$大盤變動率)*100) + 
+    
+    theme_bw() + 
+    labs(title = "Covid-19版情緒分析-對大盤變動率")
+ggplotly(temp_p)
+```
+
+```{r warning=FALSE, message=FALSE}
+# stock板對新增人數變動率
+temp_p =ggplot()+
+    geom_hline(yintercept = 0) +
+    geom_point(data = plt_df_cvaw_stock, aes(x = Date, y = score_avg), color = ifelse(plt_df_cvaw_stock$score_avg >= 0, "pink", "lightgreen"), size = 1)+
+    geom_line(data = group_plt_df_cvaw_stock, aes(x = Date, y = score_avg_date*10), color = "darkgray") + 
+    geom_point(data = group_plt_df_cvaw_stock, aes(x = Date, y = score_avg_date*10), 
+               color = ifelse(TAIEX_COVID_df$大盤變動率 >= 0, "red", "darkgreen"), 
+               size = abs(TAIEX_COVID_df$大盤變動率) * 100) + 
+    
+    theme_bw() + 
+    labs(title = "股版情緒分析-對大盤變動率") 
+ggplotly(temp_p)
+```
+
+## 各版對類股指數變動率
+
+### 以觀光類股為例
+```{r warning=FALSE, message=FALSE}
+# coivd-19版對類股
+temp_p= ggplot()+
+    geom_hline(yintercept = 0) +
+    geom_point(data = plt_df_cvaw_covid, aes(x = Date , y = score_avg), color = ifelse(plt_df_cvaw_covid$score_avg >= 0, "pink", "lightgreen"), size = 1)+
+    geom_line(data = group_plt_df_cvaw_covid, aes(x = Date, y = score_avg_date*5), color = "darkgray") +
+    geom_point(data = group_plt_df_cvaw_covid, aes(x = Date, y = score_avg_date*5), 
+               color = ifelse(TAIEX_ROC_df$觀光 >= 0, "red", "darkgreen"), 
+               size = abs(TAIEX_ROC_df$觀光) * 100) + 
+    
+    theme_bw() + 
+    labs(title = "Covid-19版情緒分析-對觀光類股變動率")
+ggplotly(temp_p)
+```
+
+```{r warning=FALSE, message=FALSE}
+# stock板對類股
+temp_p=ggplot()+
+    geom_hline(yintercept = 0) +
+    geom_point(data = plt_df_cvaw_stock, aes(x = Date, y = score_avg), color = ifelse(plt_df_cvaw_stock$score_avg >= 0, "pink", "lightgreen"), size = 1)+
+    geom_line(data = group_plt_df_cvaw_stock, aes(x = Date, y = score_avg_date*5), color = "darkgray") + 
+    geom_point(data = group_plt_df_cvaw_stock, aes(x = Date, y = score_avg_date*5), 
+               color = ifelse(TAIEX_ROC_df$觀光 >= 0, "red", "darkgreen"), 
+               size = abs(TAIEX_ROC_df$觀光) * 100) + 
+    
+    theme_bw() + 
+    labs(title = "股版情緒分析-對觀光類股變動率") 
+ggplotly(temp_p)
+```
+
+### 以光電類股為例
+```{r warning=FALSE, message=FALSE}
+# coivd-19版對類股
+temp_p= ggplot()+
+    geom_hline(yintercept = 0) +
+    geom_point(data = plt_df_cvaw_covid, aes(x = Date , y = score_avg), color = ifelse(plt_df_cvaw_covid$score_avg >= 0, "pink", "lightgreen"), size = 1)+
+    geom_line(data = group_plt_df_cvaw_covid, aes(x = Date, y = score_avg_date*5), color = "darkgray") +
+    geom_point(data = group_plt_df_cvaw_covid, aes(x = Date, y = score_avg_date*5), 
+               color = ifelse(TAIEX_ROC_df$光電 >= 0, "red", "darkgreen"), 
+               size = abs(TAIEX_ROC_df$光電) * 100) + 
+    
+    theme_bw() + 
+    labs(title = "Covid-19版情緒分析-對光電類股變動率")
+ggplotly(temp_p)
+```
+
+```{r warning=FALSE, message=FALSE}
+# stock板對類股
+temp_p=ggplot()+
+    geom_hline(yintercept = 0) +
+    geom_point(data = plt_df_cvaw_stock, aes(x = Date, y = score_avg), color = ifelse(plt_df_cvaw_stock$score_avg >= 0, "pink", "lightgreen"), size = 1)+
+    geom_line(data = group_plt_df_cvaw_stock, aes(x = Date, y = score_avg_date*5), color = "darkgray") + 
+    geom_point(data = group_plt_df_cvaw_stock, aes(x = Date, y = score_avg_date*5), 
+               color = ifelse(TAIEX_ROC_df$光電 >= 0, "red", "darkgreen"), 
+               size = abs(TAIEX_ROC_df$光電) * 100) + 
+    
+    theme_bw() + 
+    labs(title = "股版情緒分析-對光電類股變動率") 
+ggplotly(temp_p)
+```
+
+感謝閱讀。
